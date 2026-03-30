@@ -2076,6 +2076,20 @@ export const delete${pascal}ById: Delete${pascal}Repo = async (data) => null;
 `;
   }
 
+const parsedResponseFile = `import { ${pascal}Entity } from "./${name}.types.${ext}";
+
+export const parsed${pascal} = (item: Partial<${pascal}Entity> | any) => {
+  return {
+    id: item?._id ? String(item._id) : String(item?.id ?? ""),
+    // add parsed response fields here
+  };
+};
+
+export const parsed${pascal}s = (items: Partial<${pascal}Entity>[] | any[] = []) => {
+  return items.map((item) => parsed${pascal}(item));
+};
+`;
+
   /**
    * Service template that calls paginate helpers.
    */
@@ -2312,6 +2326,7 @@ export default router;
     [`${moduleBasePath}/${name}.messages.${ext}`]: messagesFile,
     [`${moduleBasePath}/${name}.validation.${ext}`]: validationFile,
     [`${moduleBasePath}/${name}.types.${ext}`]: typesFile,
+    [`${moduleBasePath}/${name}.parsedResponse.${ext}`]: parsedResponseFile,
     [`${moduleBasePath}/${name}.repository.${ext}`]: repository,
     [`${moduleBasePath}/${name}.service.${ext}`]: service,
     [`${moduleBasePath}/${name}.controller.${ext}`]: controller,
