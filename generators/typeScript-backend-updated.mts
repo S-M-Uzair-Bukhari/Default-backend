@@ -221,6 +221,7 @@ function pluralize(name: string) {
   "src/middlewares",
   "src/utils",
   "src/types",
+  "src/docs",
   "uploads",
 ].forEach((folder) => ensureDir(path.join(base, folder)));
 
@@ -1409,16 +1410,412 @@ export default securityMiddleware;
 `;
 }
 
+function autoRouterTemplateTS() {
+  return `import { Router } from "express";
+import type { PathParams } from "express-serve-static-core";
+import { zodToJsonSchema } from "zod-to-json-schema";
+import { swaggerPaths, swaggerErrorResponses } from "./swagger.registry.${ext}";
+
+const normalizePath = (path: string) => {
+  if (!path.startsWith("/")) return \`/\${path}\`;
+  return path;
+};
+
+const joinPaths = (basePath: string, routePath: string) => {
+  const base = normalizePath(basePath).replace(/\\/+$/, "");
+  const route = normalizePath(routePath);
+
+  if (route === "/") return base || "/";
+  return \`\${base}\${route}\`;
+};
+
+const toOpenApiPath = (path: string) => {
+  return path.replace(/:([^/]+)/g, "{$1}");
+};
+
+const toPathParameters = (path: string) => {
+  const matches = [...path.matchAll(/:([^/]+)/g)];
+  return matches.map((m) => ({
+    name: m[1],
+    in: "path",
+    required: true,
+    schema: { type: "string" },
+  }));
+};
+
+const toSchema = (schema: any) => {
+  if (!schema) return undefined;
+
+  const result: any = zodToJsonSchema(schema, { target: "openApi3" });
+
+  if (result?.$schema) {
+    delete result.$schema;
+  }
+
+  return result;
+};
+
+const toQueryParameters = (schema: any) => {
+  const jsonSchema: any = toSchema(schema);
+
+  if (!jsonSchema || jsonSchema.type !== "object" || !jsonSchema.properties) {
+    return [];
+  }
+
+  const required = Array.isArray(jsonSchema.required) ? jsonSchema.required : [];
+
+  return Object.entries(jsonSchema.properties).map(([name, propSchema]) => ({
+    name,
+    in: "query",
+    required: required.includes(name),
+    schema: propSchema,
+  }));
+};
+
+export const createAutoRouter = (basePath = "", defaultTag?: string) => {
+  const router = Router();
+  const methods = ["get", "post", "patch", "delete"] as const;
+
+  methods.forEach((method) => {
+    const original = router[method];
+
+    router[method] = function (path: PathParams, ...handlers: any[]) {
+      if (typeof path !== "string") {
+        return (original as unknown as (...args: any[]) => Router).call(router, path, ...handlers);
+      }
+
+      const meta: any = {
+        tags: defaultTag ? [defaultTag] : [],
+      };
+
+      handlers.forEach((h) => {
+        if (h?.constructor?.__swaggerFactory) {
+          const data = h.constructor.__swaggerFactory(h.schema);
+          meta.params = data.params ?? meta.params;
+          meta.body = data.body ?? meta.body;
+          meta.query = data.query ?? meta.query;
+          meta.tags = data.tags?.length ? data.tags : meta.tags;
+          meta.summary = data.summary ?? meta.summary;
+          meta.description = data.description ?? meta.description;
+          meta.response = data.response ?? meta.response;
+          meta.responseExample = data.responseExample ?? meta.responseExample;
+          meta.auth = data.auth ?? meta.auth;
+          meta.errors = data.errors ?? meta.errors;
+        } else if (h?.__swagger) {
+          meta.params = h.__swagger.params ?? meta.params;
+          meta.body = h.__swagger.body ?? meta.body;
+          meta.query = h.__swagger.query ?? meta.query;
+          meta.tags = h.__swagger.tags?.length ? h.__swagger.tags : meta.tags;
+          meta.summary = h.__swagger.summary ?? meta.summary;
+          meta.description = h.__swagger.description ?? meta.description;
+          meta.response = h.__swagger.response ?? meta.response;
+          meta.responseExample = h.__swagger.responseExample ?? meta.responseExample;
+          meta.auth = h.__swagger.auth ?? meta.auth;
+          meta.errors = h.__swagger.errors ?? meta.errors;
+        }
+      });
+
+      const fullExpressPath = joinPaths(basePath, path);
+      const openApiPath = toOpenApiPath(fullExpressPath);
+
+      if (!swaggerPaths[openApiPath]) {
+        swaggerPaths[openApiPath] = {};
+      }
+
+      const pathParameters = toPathParameters(fullExpressPath);
+      const queryParameters = toQueryParameters(meta.query);
+      const parameters = [...pathParameters, ...queryParameters];
+
+      const responses: Record<string, any> = {
+        200: {
+          description: "Success",
+          content: {
+            "application/json": {
+              schema: toSchema(meta.response) || { type: "object" },
+              example: meta.responseExample,
+            },
+          },
+        },
+      };
+
+      const autoErrorStatuses = new Set<number>();
+
+      if (meta.body || meta.query || meta.params) {
+        autoErrorStatuses.add(400);
+      }
+
+      if (meta.auth) {
+        autoErrorStatuses.add(401);
+      }
+
+      autoErrorStatuses.add(500);
+
+      (meta.errors || []).forEach((status: number) => autoErrorStatuses.add(status));
+
+      [...autoErrorStatuses].forEach((status) => {
+        const errorDef = swaggerErrorResponses[status];
+        if (!errorDef) return;
+
+        responses[status] = {
+          description: errorDef.description,
+          content: {
+            "application/json": {
+              schema: toSchema(errorDef.schema),
+              example: errorDef.example,
+            },
+          },
+        };
+      });
+
+      swaggerPaths[openApiPath][method] = {
+        tags: meta.tags?.length ? meta.tags : ["default"],
+        summary: meta.summary || \`\${method.toUpperCase()} \${openApiPath}\`,
+        description: meta.description,
+        parameters: parameters.length ? parameters : undefined,
+        requestBody:
+          meta.body && !["get"].includes(method)
+            ? {
+                required: true,
+                content: {
+                  "application/json": {
+                    schema: toSchema(meta.body),
+                  },
+                },
+              }
+            : undefined,
+        responses,
+        security: meta.auth ? [{ bearerAuth: [] }] : undefined,
+      };
+
+      return (original as unknown as (...args: any[]) => Router).call(router, path, ...handlers);
+    };
+  });
+
+  return router;
+};
+`;
+}
+
+function swaggerRegistryTemplateTS() {
+  return `import { z } from "zod";
+
+export const swaggerPaths: Record<string, any> = {};
+
+export const withSwagger = (handler: any, meta: Record<string, any>) => {
+  handler.__swagger = meta;
+  return handler;
+};
+
+const baseErrorDataSchema = z.object({}).passthrough();
+
+export const apiErrorResponseSchema = z.object({
+  success: z.literal(false),
+  status: z.number(),
+  message: z.string(),
+  data: baseErrorDataSchema,
+});
+
+export const validationErrorDataSchema = z.array(
+  z.object({
+    path: z.string(),
+    message: z.string(),
+  })
+);
+
+export const validationErrorResponseSchema = z.object({
+  success: z.literal(false),
+  status: z.literal(400),
+  message: z.string(),
+  data: validationErrorDataSchema,
+});
+
+export const authErrorResponseSchema = z.object({
+  success: z.literal(false),
+  status: z.literal(401),
+  message: z.string(),
+  data: z.object({
+    type: z.string(),
+  }),
+});
+
+export const fsErrorResponseSchema = z.object({
+  success: z.literal(false),
+  status: z.union([z.literal(400), z.literal(403)]),
+  message: z.string(),
+  data: z.object({
+    type: z.literal("FsError"),
+    code: z.string(),
+    reason: z.string(),
+  }).passthrough(),
+});
+
+export const multerErrorResponseSchema = z.object({
+  success: z.literal(false),
+  status: z.union([z.literal(400), z.literal(413)]),
+  message: z.string(),
+  data: z.object({
+    type: z.literal("MulterError"),
+    code: z.string().optional(),
+  }),
+});
+
+export const databaseErrorResponseSchema = z.object({
+  success: z.literal(false),
+  status: z.number(),
+  message: z.string(),
+  data: z.object({
+    type: z.literal("DatabaseError"),
+    provider: z.string(),
+    name: z.string().optional(),
+    code: z.string().optional(),
+    reason: z.string().optional(),
+    meta: z.any().nullable().optional(),
+    clientVersion: z.any().nullable().optional(),
+    detail: z.any().nullable().optional(),
+    schema: z.any().nullable().optional(),
+    table: z.any().nullable().optional(),
+    column: z.any().nullable().optional(),
+    constraint: z.any().nullable().optional(),
+    routine: z.any().nullable().optional(),
+    errorCode: z.any().nullable().optional(),
+  }).passthrough(),
+});
+
+export const swaggerErrorResponses: Record<
+  number,
+  { description: string; schema: any; example: any }
+> = {
+  400: {
+    description: "Bad Request",
+    schema: validationErrorResponseSchema,
+    example: {
+      success: false,
+      status: 400,
+      message: "validation Error",
+      data: [
+        {
+          path: "email",
+          message: "Invalid email",
+        },
+      ],
+    },
+  },
+  401: {
+    description: "Unauthorized",
+    schema: authErrorResponseSchema,
+    example: {
+      success: false,
+      status: 401,
+      message: "Invalid token",
+      data: {
+        type: "JsonWebTokenError",
+      },
+    },
+  },
+  403: {
+    description: "Forbidden",
+    schema: apiErrorResponseSchema,
+    example: {
+      success: false,
+      status: 403,
+      message: "The server does not have permission to write to the upload directory.",
+      data: {
+        type: "FsError",
+        code: "EACCES",
+        reason: "INSUFFICIENT_PERMISSIONS",
+      },
+    },
+  },
+  404: {
+    description: "Not Found",
+    schema: apiErrorResponseSchema,
+    example: {
+      success: false,
+      status: 404,
+      message: "The requested record was not found.",
+      data: {
+        type: "DatabaseError",
+        provider: "prisma",
+        code: "P2025",
+        reason: "PRISMA_P2025_ERROR",
+      },
+    },
+  },
+  409: {
+    description: "Conflict",
+    schema: databaseErrorResponseSchema,
+    example: {
+      success: false,
+      status: 409,
+      message: "Duplicate value violates unique constraint.",
+      data: {
+        type: "DatabaseError",
+        provider: "prisma",
+        code: "P2002",
+        reason: "PRISMA_P2002_ERROR",
+        meta: {
+          target: ["email"],
+        },
+      },
+    },
+  },
+  413: {
+    description: "Payload Too Large",
+    schema: multerErrorResponseSchema,
+    example: {
+      success: false,
+      status: 413,
+      message: "File too large",
+      data: {
+        type: "MulterError",
+        code: "LIMIT_FILE_SIZE",
+      },
+    },
+  },
+  500: {
+    description: "Internal Server Error",
+    schema: apiErrorResponseSchema,
+    example: {
+      success: false,
+      status: 500,
+      message: "Internal Server Error",
+      data: {},
+    },
+  },
+  503: {
+    description: "Service Unavailable",
+    schema: databaseErrorResponseSchema,
+    example: {
+      success: false,
+      status: 503,
+      message: "Database connection pool timed out.",
+      data: {
+        type: "DatabaseError",
+        provider: "prisma",
+        code: "P2024",
+        reason: "PRISMA_P2024_ERROR",
+      },
+    },
+  },
+};
+`;
+}
+
 /**
  * Shared files written for all generated projects.
  */
 const sharedFiles: Record<string, string> = {
   [`src/app.${ext}`]: `import express from "express";
+import fs from "fs";
+import path from "path";
+import swaggerUi from "swagger-ui-express";
+
 import routes from "./routes.${ext}";
 import { requestContext } from "./utils/context.${ext}";
 import requestLogger from "./middlewares/requestLogger.${ext}";
 import securityMiddleware from "./middlewares/securityMiddleware.${ext}";
 import { errorMiddleware } from "./middlewares/errorMiddleware.${ext}";
+import { swaggerPaths } from "./docs/swagger.registry.${ext}";
 
 const app = express();
 
@@ -1432,6 +1829,58 @@ app.get("/health", (req, res) => {
 });
 
 app.use("/api", routes);
+
+const swaggerDocument = {
+  openapi: "3.0.0",
+  info: {
+    title: "My API",
+    version: "1.0.0",
+  },
+  servers: [
+    {
+      url: "http://localhost:5000/api",
+    },
+  ],
+  components: {
+    securitySchemes: {
+      bearerAuth: {
+        type: "http",
+        scheme: "bearer",
+        bearerFormat: "JWT",
+      },
+    },
+  },
+  paths: swaggerPaths,
+};
+
+const swaggerEnabled = process.env.SWAGGER_ENABLED === "true";
+const swaggerWriteFile = process.env.SWAGGER_WRITE_FILE === "true";
+
+if (swaggerWriteFile) {
+  const swaggerFilePath = path.join(process.cwd(), "swagger.json");
+
+  fs.writeFileSync(
+    swaggerFilePath,
+    JSON.stringify(swaggerDocument, null, 2),
+    "utf-8"
+  );
+
+  console.log(\`Swagger JSON generated at: \${swaggerFilePath}\`);
+}
+
+if (swaggerEnabled) {
+  app.get("/docs/json", (req, res) => {
+    void req;
+
+    res.setHeader("Content-Type", "application/json");
+    res.setHeader("Content-Disposition", "attachment; filename=openapi.json");
+
+    return res.send(JSON.stringify(swaggerDocument, null, 2));
+  });
+
+  app.use("/docs", swaggerUi.serve, swaggerUi.setup(swaggerDocument));
+}
+
 app.use(errorMiddleware);
 
 export default app;
@@ -1744,6 +2193,10 @@ function isEmptyFiles(files: unknown) {
 
   [`src/middlewares/uploadMiddleware.${ext}`]: uploadMiddlewareTemplateTS(),
 
+  [`src/docs/auto.router.${ext}`]: autoRouterTemplateTS(),
+
+  [`src/docs/swagger.registry.${ext}`]: swaggerRegistryTemplateTS(),
+
   ...(db === "mongo"
     ? { [`src/middlewares/paginationMiddleware.${ext}`]: mongoPaginationFileExactTS() }
     : {}),
@@ -1782,6 +2235,8 @@ JWT_EXPIRES_IN=1d
 LOG_LEVEL=debug
 COMMIT_SHA=
 SLOW_QUERY_MS=200
+SWAGGER_ENABLED=true
+SWAGGER_WRITE_FILE=true
 ${db === "mongo" ? `MONGO_URI="mongodb://localhost:27017/${projectName}"\n` : ""}
 ${db === "postgres" ? `DATABASE_URL="postgresql://USER:PASSWORD@localhost:5432/${projectName}?schema=public"\n` : ""}
 `,
@@ -1908,12 +2363,53 @@ export const update${pascal}Schema = z.object({
   email: z.string().email().optional(),` : `// add optional fields here`}
 });
 
+const ${camel}Schema = z.object({
+  id: z.string(),
+  ${name === "user"
+      ? `name: z.string(),
+  email: z.string().email(),
+  role: z.string(),
+  isDeleted: z.boolean(),
+  createdAt: z.string().datetime(),
+  updatedAt: z.string().datetime(),`
+      : `// add response fields here`}
+});
+
+const paginated${pascal}sDataSchema = z.object({
+  data: z.array(${camel}Schema),
+  page: z.number(),
+  limit: z.number(),
+  totalPages: z.number(),
+  totalResults: z.number(),
+});
+
 export const ${pascal}Validation = {
   getAll${pascal}sValidation: { query: getAll${pascal}sSchema },
   get${pascal}ByIdValidation: { params: get${pascal}ByIdSchema },
   createValidation: { body: create${pascal}Schema },
   update${pascal}ByIdValidation: { query: get${pascal}ByIdSchema, body: update${pascal}Schema },
   deleteValidation: { body: get${pascal}ByIdSchema },
+
+  ${camel}ResponseSchema: z.object({
+    success: z.literal(true),
+    status: z.literal(200),
+    message: z.string(),
+    data: ${camel}Schema,
+  }),
+
+  ${camel}ListResponseSchema: z.object({
+    success: z.literal(true),
+    status: z.literal(200),
+    message: z.string(),
+    data: paginated${pascal}sDataSchema,
+  }),
+
+  delete${pascal}ResponseSchema: z.object({
+    success: z.literal(true),
+    status: z.literal(200),
+    message: z.string(),
+    data: z.any().optional(),
+  }),
 };
 `;
 
@@ -1964,6 +2460,94 @@ export type ${pascal}ExistRepo = (data: ${pascal}ExistDTO) => Promise<${pascal}E
 export type Create${pascal}Repo = (data: Create${pascal}DTO) => Promise<${pascal}Entity>;
 export type Update${pascal}Repo = (data: Update${pascal}DTO) => Promise<${pascal}Entity | null>;
 export type Delete${pascal}Repo = (data: Delete${pascal}DTO) => Promise<${pascal}Entity | null>;
+`;
+
+  const exampleId =
+    db === "postgres"
+      ? "a0ce7956-d451-487c-a03f-c3b62c8646c9"
+      : db === "mongo"
+        ? "67db0a1f4c9b7f3a2c1d9e10"
+        : "example-id";
+
+  const exampleEntity =
+    name === "user"
+      ? `{
+  id: "${exampleId}",
+  name: "John Doe",
+  email: "john@example.com",
+  role: "user",
+  isDeleted: false,
+  createdAt: "2026-03-19T18:52:02.833Z",
+  updatedAt: "2026-03-19T18:52:02.833Z",
+}`
+      : `{
+  id: "${exampleId}",
+  createdAt: "2026-03-19T18:52:02.833Z",
+  updatedAt: "2026-03-19T18:52:02.833Z",
+}`;
+
+  const docsFile = `import { ${pascal}Validation } from "./${name}.validation.${ext}";
+import { ${pascal}Messages } from "./${name}.messages.${ext}";
+
+const ${camel}Example = ${exampleEntity};
+
+export const ${pascal}Docs = {
+  list: {
+    schema: ${pascal}Validation.${camel}ListResponseSchema,
+    example: {
+      success: true,
+      status: 200,
+      message: ${pascal}Messages.LIST_SUCCESS,
+      data: {
+        data: [${camel}Example],
+        page: 1,
+        limit: 10,
+        totalPages: 1,
+        totalResults: 1,
+      },
+    },
+  },
+
+  get: {
+    schema: ${pascal}Validation.${camel}ResponseSchema,
+    example: {
+      success: true,
+      status: 200,
+      message: ${pascal}Messages.GET_SUCCESS,
+      data: ${camel}Example,
+    },
+  },
+
+  create: {
+    schema: ${pascal}Validation.${camel}ResponseSchema,
+    example: {
+      success: true,
+      status: 200,
+      message: ${pascal}Messages.CREATE_SUCCESS,
+      data: ${camel}Example,
+    },
+  },
+
+  update: {
+    schema: ${pascal}Validation.${camel}ResponseSchema,
+    example: {
+      success: true,
+      status: 200,
+      message: ${pascal}Messages.UPDATE_SUCCESS,
+      data: ${camel}Example,
+    },
+  },
+
+  delete: {
+    schema: ${pascal}Validation.delete${pascal}ResponseSchema,
+    example: {
+      success: true,
+      status: 200,
+      message: ${pascal}Messages.DELETE_SUCCESS,
+      data: {},
+    },
+  },
+};
 `;
 
   let repository = "";
@@ -2076,7 +2660,7 @@ export const delete${pascal}ById: Delete${pascal}Repo = async (data) => null;
 `;
   }
 
-const parsedResponseFile = `import { ${pascal}Entity } from "./${name}.types.${ext}";
+  const parsedResponseFile = `import { ${pascal}Entity } from "./${name}.types.${ext}";
 
 export const parsed${pascal} = (item: Partial<${pascal}Entity> | any) => {
   return {
@@ -2103,43 +2687,55 @@ export const parsed${pascal}s = (items: Partial<${pascal}Entity>[] | any[] = [])
   delete${pascal}ById,
   ${camel}Exist
 } from "./${name}.repository.${ext}";
-import { Create${pascal}DTO, Delete${pascal}DTO, Get${pascal}DTO, Update${pascal}DTO, ${pascal}Entity, mapToEntity } from "./${name}.types.${ext}";
+import type { Create${pascal}DTO, Delete${pascal}DTO, Get${pascal}DTO, Update${pascal}DTO, ${pascal}Entity } from "./${name}.types.${ext}";
 import { logger } from "../../utils/logger.${ext}";
 import { getCtx } from "../../utils/context.${ext}";
 import errorResponse from "../../utils/errorResponse.${ext}";
 import { mongoPaginate } from "../../middlewares/paginationMiddleware.${ext}";
 import ${pascal}Model from "./${name}.schema.${ext}";
 import { ${pascal}Messages } from "./${name}.messages.${ext}";
-import { ApiResponse } from "../../types/global.types.${ext}";
+import type { ApiResponse } from "../../types/global.types.${ext}";
+import { parsed${pascal}, parsed${pascal}s } from "./${name}.parsedResponse.${ext}";
 
 export const create${pascal} = async (data: Create${pascal}DTO): Promise<ApiResponse<${pascal}Entity>> => {
-  ${name === "user" ? `const exist = await ${camel}Exist({email: data.email});
-  if(exist){
+  ${name === "user" ? `const exist = await ${camel}Exist({ email: data.email });
+  if (exist) {
     logger.warn({ event: "${name}_service_error", svc: "${name}", action: "${name}_already_exist", reason: ${pascal}Messages.ALREADY_EXIST, ...getCtx() });
     throw new errorResponse(${pascal}Messages.ALREADY_EXIST, 400);
-  };` : ``}
+  }` : ``}
 
-  const ${camel} = await create${pascal}Record(data);
-  if(!${camel}){
+  const record = await create${pascal}Record(data);
+  if (!record) {
     logger.warn({ event: "${name}_service_error", svc: "${name}", action: "create_${name}", reason: ${pascal}Messages.CREATE_FAILED, ...getCtx() });
     throw new errorResponse(${pascal}Messages.CREATE_FAILED, 400);
   }
-  return { success: true, status: 200, message: ${pascal}Messages.CREATE_SUCCESS, data: ${camel} };
+
+  const parsedData = parsed${pascal}(record);
+
+  return { success: true, status: 200, message: ${pascal}Messages.CREATE_SUCCESS, data: parsedData };
 };
 
 export const list${pascal} = async (filter: Record<string, string> = {}, options: Record<string, unknown> = {}) => {
-  const data = await mongoPaginate(${pascal}Model, filter, options);
+  const ${plural} = await mongoPaginate(${pascal}Model, filter, options);
+  const parsed${pascal}Data = parsed${pascal}s(${plural}.data);
+  const data = {
+    ...${plural},
+    data: parsed${pascal}Data
+  };
+
   return { success: true, status: 200, message: ${pascal}Messages.LIST_SUCCESS, data: data };
 };
 
-export const get${pascal} = async (id: Get${pascal}DTO): Promise<ApiResponse<${pascal}Entity>> => {
-  const ${name} = await find${pascal}ById(id);
+export const get${pascal} = async (data: Get${pascal}DTO): Promise<ApiResponse<${pascal}Entity>> => {
+  const ${name} = await find${pascal}ById(data);
   if (!${name}) {
     logger.warn({ event: "${name}_service_error", svc: "${name}", action: "get_${name}", reason: "${pascal.toUpperCase()}_NOT_FOUND", ...getCtx() });
     throw new errorResponse(${pascal}Messages.NOT_FOUND, 404);
   }
 
-  return { success: true, status: 200, message: ${pascal}Messages.GET_SUCCESS, data: ${name} };
+  const parsedData = parsed${pascal}(${name});
+
+  return { success: true, status: 200, message: ${pascal}Messages.GET_SUCCESS, data: parsedData };
 };
 
 export const update${pascal} = async (data: Update${pascal}DTO): Promise<ApiResponse<${pascal}Entity>> => {
@@ -2148,17 +2744,21 @@ export const update${pascal} = async (data: Update${pascal}DTO): Promise<ApiResp
     logger.warn({ event: "${name}_service_error", svc: "${name}", action: "update_${name}", reason: "${pascal.toUpperCase()}_NOT_FOUND", ...getCtx() });
     throw new errorResponse(${pascal}Messages.NOT_FOUND, 404);
   }
-  return { success: true, status: 200, message: ${pascal}Messages.UPDATE_SUCCESS, data: updated };
+
+  const parsedData = parsed${pascal}(updated);
+
+  return { success: true, status: 200, message: ${pascal}Messages.UPDATE_SUCCESS, data: parsedData };
 };
 
-export const delete${pascal} = async (data: Delete${pascal}DTO): Promise<ApiResponse<${pascal}Entity>>=> {
+export const delete${pascal} = async (data: Delete${pascal}DTO): Promise<ApiResponse<${pascal}Entity>> => {
   const ${name} = await delete${pascal}ById(data.id);
   if (!${name}) {
     logger.warn({ event: "${name}_service_error", svc: "${name}", action: "delete_${name}", reason: "${pascal.toUpperCase()}_NOT_FOUND", ...getCtx() });
     throw new errorResponse(${pascal}Messages.NOT_FOUND, 404);
   }
+
   return { success: true, status: 200, message: ${pascal}Messages.DELETE_SUCCESS };
-}; 
+};
 `;
   } else if (db === "postgres") {
     service = `import { logger } from "../../utils/logger.${ext}";
@@ -2176,9 +2776,10 @@ import {
   delete${pascal}ById,
   ${camel}Exist
 } from "./${name}.repository.${ext}";
+import { parsed${pascal}, parsed${pascal}s } from "./${name}.parsedResponse.${ext}";
 
 export const create${pascal} = async (data: Create${pascal}DTO): Promise<ApiResponse<${pascal}Entity>> => {
-  ${name === "user" ? `const exist = await ${camel}Exist({ email: (data).email });
+  ${name === "user" ? `const exist = await ${camel}Exist({ email: data.email });
   if (exist) {
     logger.warn({ event: "${name}_service_error", svc: "${name}", action: "${name}_already_exist", reason: ${pascal}Messages.ALREADY_EXIST, ...getCtx() });
     throw new errorResponse(${pascal}Messages.ALREADY_EXIST, 400);
@@ -2186,15 +2787,19 @@ export const create${pascal} = async (data: Create${pascal}DTO): Promise<ApiResp
 
   const record = await create${pascal}Record(data);
 
-  return { success: true, status: 200, message: ${pascal}Messages.CREATE_SUCCESS, data: record };
+  const parsedData = parsed${pascal}(record);
+
+  return { success: true, status: 200, message: ${pascal}Messages.CREATE_SUCCESS, data: parsedData };
 };
 
 export const list${pascal} = async (filter: Record<string, string> = {}, options: Record<string, unknown> = {}) => {
-  const users = await prismaPaginate(prisma.${prismaDelegate}, filter, options);
+  const ${plural} = await prismaPaginate(prisma.${prismaDelegate}, filter, options);
+  const parsed${pascal}Data = parsed${pascal}s(${plural}.data);
   const data = {
-    ...users,
-    data: users.data
-    }
+    ...${plural},
+    data: parsed${pascal}Data
+  };
+
   return { success: true, status: 200, message: ${pascal}Messages.LIST_SUCCESS, data: data };
 };
 
@@ -2205,13 +2810,17 @@ export const get${pascal} = async (data: Get${pascal}DTO): Promise<ApiResponse<$
     throw new errorResponse(${pascal}Messages.NOT_FOUND, 404);
   }
 
-  return { success: true, status: 200, message: ${pascal}Messages.GET_SUCCESS, data: ${name} };
+  const parsedData = parsed${pascal}(${name});
+
+  return { success: true, status: 200, message: ${pascal}Messages.GET_SUCCESS, data: parsedData };
 };
 
 export const update${pascal} = async (data: Update${pascal}DTO): Promise<ApiResponse<${pascal}Entity>> => {
   const updated = await update${pascal}ById(data);
 
-  return { success: true, status: 200, message: ${pascal}Messages.UPDATE_SUCCESS, data: updated };
+  const parsedData = parsed${pascal}(updated);
+
+  return { success: true, status: 200, message: ${pascal}Messages.UPDATE_SUCCESS, data: parsedData };
 };
 
 export const delete${pascal} = async (data: Delete${pascal}DTO): Promise<ApiResponse<${pascal}Entity>> => {
@@ -2298,9 +2907,11 @@ export const delete${pascal}Handler = asyncHandler(async (req: Request, res: Res
   /**
    * Routes template exactly like yours.
    */
-  const routes = `import { Router } from "express";
+  const routes = `import { createAutoRouter } from "../../docs/auto.router.${ext}";
 import { validate } from "../../middlewares/validate.${ext}";
+import { withSwagger } from "../../docs/swagger.registry.${ext}";
 import { ${pascal}Validation } from "./${name}.validation.${ext}";
+import { ${pascal}Docs } from "./${name}.docs.${ext}";
 import {
   create${pascal}Handler,
   list${pascal}Handler,
@@ -2309,14 +2920,71 @@ import {
   delete${pascal}Handler
 } from "./${name}.controller.${ext}";
 
-const router = Router();
+const router = createAutoRouter("/${plural}", "${pascal}s");
 
-router.get("/", validate(${pascal}Validation.getAll${pascal}sValidation), list${pascal}Handler);
-router.post("/", validate(${pascal}Validation.createValidation), create${pascal}Handler);
+router.get(
+  "/",
+  validate(${pascal}Validation.getAll${pascal}sValidation),
+  withSwagger(list${pascal}Handler, {
+    summary: "List ${plural}",
+    description: "Returns the list of ${plural}",
+    auth: true,
+    response: ${pascal}Docs.list.schema,
+    responseExample: ${pascal}Docs.list.example,
+  })
+);
 
-router.get("/:id", validate(${pascal}Validation.get${pascal}ByIdValidation), get${pascal}Handler);
-router.patch("/", validate(${pascal}Validation.update${pascal}ByIdValidation), update${pascal}Handler);
-router.delete("/", validate(${pascal}Validation.deleteValidation), delete${pascal}Handler);
+router.post(
+  "/",
+  validate(${pascal}Validation.createValidation),
+  withSwagger(create${pascal}Handler, {
+    summary: "Create ${name}",
+    description: "Creates a new ${name}",
+    auth: true,
+    response: ${pascal}Docs.create.schema,
+    responseExample: ${pascal}Docs.create.example,
+    errors: [409],
+  })
+);
+
+router.get(
+  "/:id",
+  validate(${pascal}Validation.get${pascal}ByIdValidation),
+  withSwagger(get${pascal}Handler, {
+    summary: "Get ${name} by id",
+    description: "Returns a single ${name} by id",
+    auth: true,
+    response: ${pascal}Docs.get.schema,
+    responseExample: ${pascal}Docs.get.example,
+    errors: [404],
+  })
+);
+
+router.patch(
+  "/",
+  validate(${pascal}Validation.update${pascal}ByIdValidation),
+  withSwagger(update${pascal}Handler, {
+    summary: "Update ${name}",
+    description: "Updates a ${name}",
+    auth: true,
+    response: ${pascal}Docs.update.schema,
+    responseExample: ${pascal}Docs.update.example,
+    errors: [404, 409],
+  })
+);
+
+router.delete(
+  "/",
+  validate(${pascal}Validation.deleteValidation),
+  withSwagger(delete${pascal}Handler, {
+    summary: "Delete ${name}",
+    description: "Deletes a ${name}",
+    auth: true,
+    response: ${pascal}Docs.delete.schema,
+    responseExample: ${pascal}Docs.delete.example,
+    errors: [404],
+  })
+);
 
 export default router;
 `;
@@ -2327,6 +2995,7 @@ export default router;
     [`${moduleBasePath}/${name}.validation.${ext}`]: validationFile,
     [`${moduleBasePath}/${name}.types.${ext}`]: typesFile,
     [`${moduleBasePath}/${name}.parsedResponse.${ext}`]: parsedResponseFile,
+    [`${moduleBasePath}/${name}.docs.${ext}`]: docsFile,
     [`${moduleBasePath}/${name}.repository.${ext}`]: repository,
     [`${moduleBasePath}/${name}.service.${ext}`]: service,
     [`${moduleBasePath}/${name}.controller.${ext}`]: controller,
@@ -2421,6 +3090,8 @@ if (!fs.existsSync(pkgJsonPath)) {
     hpp: "^0.2.3",
     cors: "^2.8.5",
     "express-rate-limit": "^7.5.0",
+    "swagger-ui-express": "^5.0.1",
+    "zod-to-json-schema": "^3.24.6",
   };
 
   const devDependencies: Record<string, string> = {
@@ -2432,7 +3103,8 @@ if (!fs.existsSync(pkgJsonPath)) {
     "@types/multer": "^2.1.0",
     "@types/mime-types": "^2.1.4",
     "@types/pg": "^8.10.0",
-    "@types/cookie-parser": "^1.4.9"
+    "@types/cookie-parser": "^1.4.9",
+    "@types/swagger-ui-express": "^4.1.8",
   };
 
   if (db === "mongo") {
