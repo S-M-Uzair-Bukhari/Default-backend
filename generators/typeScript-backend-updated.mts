@@ -3152,7 +3152,7 @@ if (!fs.existsSync(pkgJsonPath)) {
 /**
  * Post-generation notes.
  */
-console.log(`✅ Backend (.mts) created successfully 🚀`);
+console.log(`Backend (.mts) created successfully 🚀`);
 console.log(`DB mode: ${db}`);
 if (modules.length) console.log(`Modules scaffolded: ${modules.join(", ")}`);
 console.log(`Next: cd ${projectName} && npm i && npm run dev`);
