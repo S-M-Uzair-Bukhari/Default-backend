@@ -4,6 +4,7 @@
   "description": "",
   "main": "index.js",
   "scripts": {
+    "postinstall": "node scripts/postinstall-message.mjs",
     "test": "echo \"Error: no test specified\" && exit 1"
   },
   "keywords": [],
@@ -13,5 +14,9 @@
   "devDependencies": {
     "@types/node": "^25.3.0",
     "tsx": "^4.21.0"
+  },
+  "dependencies": {
+    "inquirer": "^13.3.2"
   }
 }
+

@@ -5,53 +5,128 @@
  * Small wrapper around the real backend generators.
  * - Uses the TypeScript generator when `--ts` is passed
  * - Uses the JavaScript generator otherwise
- * - Requires a project name and forwards the remaining CLI flags
+ * - Accepts direct CLI arguments or prompts for missing values with Inquirer
+ * - Can optionally generate a starter GitHub Actions CI/CD workflow
+ *
+ * If you just cloned or pulled this repository, run `npm install` first.
+ * This installs local dependencies required by this script, such as `inquirer` and `tsx`.
+ *
+ * Simple setup for new users:
+ * 1. Run `npm install`
+ * 2. Run `node create-backend.mjs --help`
+ * 3. Run `node create-backend.mjs my-api` to start the guided setup
+ *
+ * How to use this script:
+ * - Run `node create-backend.mjs` for a fully interactive flow
+ * - Run `node create-backend.mjs <project-name>` to create a project and choose options in the CLI
+ * - The CLI can ask you to select JavaScript or TypeScript
+ * - The CLI can ask you to select a database: `none`, `mongo`, or `postgres`
+ * - If you already know what you want, you can pass flags directly
  *
  * Supported flags:
- * - `--ts`
- * - `--modules`
- * - `--db`
+ * - `--ts`      Use the TypeScript generator instead of the JavaScript one
+ * - `--modules` Pass a comma-separated list of modules to scaffold, such as `user,post`
+ * - `--db`      Choose the database mode: `none`, `mongo`, or `postgres`
+ * - `--cicd`    Prompt for and generate a starter GitHub Actions deployment workflow
+ * - `--help`    Show usage instructions without generating a project
  *
  * Usage:
- * `node create-backend.mjs <project-name> [--ts] --modules user,post --db mongo`
+ * `node create-backend.mjs <project-name> [--ts] [--modules user,post] [--db mongo|postgres|none] [--cicd]`
+ * `node create-backend.mjs`
  *
- * TS:
- * mongo: node create-backend.mjs <project-name> --ts --modules user,post --db mongo
- * postgres: node create-backend.mjs <project-name> --ts --modules user,post --db postgres
+ * Quick CLI examples:
+ * `npm install`
+ * `node create-backend.mjs --help`
+ * `node create-backend.mjs my-api`
  *
- * JS:
- * mongo: node create-backend.mjs <project-name> --modules user,post --db mongo
- * postgres: node create-backend.mjs <project-name> --modules user,post --db postgres
+ * More examples:
+ * `node create-backend.mjs my-api`
+ * `node create-backend.mjs my-api --modules user,post --db mongo`
+ * `node create-backend.mjs my-api --ts --modules user,post --db postgres --cicd`
  */
 import { spawnSync } from "node:child_process";
-import path from "node:path";
 import fs from "node:fs";
+import path from "node:path";
+import inquirer from "inquirer";
 
 const args = process.argv.slice(2);
-const useTS = args.includes("--ts");
+const validDbValues = new Set(["none", "mongo", "postgres"]);
 const optionFlagsWithValue = new Set(["--modules", "--db"]);
+const useTS = args.includes("--ts");
+const wantsCICD = args.includes("--cicd");
+const wantsHelp = args.includes("--help") || args.includes("-h");
+
+const root = process.cwd();
+const jsGen = path.join(root, "generators", "javaScript-backend-updated.mjs");
+const tsGen = path.join(root, "generators", "typeScript-backend-updated.mts");
+const tsxCli = path.join(root, "node_modules", "tsx", "dist", "cli.mjs");
 
 /**
- * Extracts the project name and preserves the remaining generator args.
- * The first non-flag token is treated as the project name.
+ * Prints the supported usage patterns for this wrapper.
+ */
+function printUsage() {
+  console.log("If you just cloned or pulled this repository, run npm install first.");
+  console.log("");
+  console.log("Quick start:");
+  console.log("  1. npm install");
+  console.log("  2. node create-backend.mjs --help");
+  console.log("  3. node create-backend.mjs my-api");
+  console.log("");
+  console.log("Usage: node create-backend.mjs <project-name> [--ts] [--modules user,post] [--db mongo|postgres|none] [--cicd]");
+  console.log("Interactive: node create-backend.mjs");
+  console.log("");
+  console.log("What the CLI will ask you:");
+  console.log("  Language: JavaScript (.mjs) or TypeScript (.mts)");
+  console.log("  Database: none, mongo, or postgres");
+  console.log("  Optional modules and optional CI/CD setup");
+  console.log("");
+  console.log("Examples:");
+  console.log("  node create-backend.mjs my-api");
+  console.log("  node create-backend.mjs my-api --modules user,post --db mongo");
+  console.log("  node create-backend.mjs my-api --ts --modules user,post --db postgres --cicd");
+}
+
+/**
+ * Extracts wrapper-controlled flags while keeping any unknown flags available
+ * for future passthrough support.
  *
  * @param {string[]} rawArgs
- * @returns {{ projectName: string | null, forwardArgs: string[] }}
+ * @returns {{
+ *   projectName: string | null,
+ *   dbValue: string | null,
+ *   modulesValue: string | null,
+ *   passthroughArgs: string[],
+ *   missingValueFlags: string[]
+ * }}
  */
 function normalizeGeneratorArgs(rawArgs) {
-  const cleanedArgs = rawArgs.filter((arg) => arg !== "--ts");
+  const cleanedArgs = rawArgs.filter(
+    (arg) => !["--ts", "--cicd", "--help", "-h"].includes(arg)
+  );
   const passthroughArgs = [];
+  const missingValueFlags = [];
   let projectName = null;
+  let dbValue = null;
+  let modulesValue = null;
 
   for (let i = 0; i < cleanedArgs.length; i += 1) {
     const arg = cleanedArgs[i];
 
     if (optionFlagsWithValue.has(arg)) {
-      passthroughArgs.push(arg);
+      const nextArg = cleanedArgs[i + 1];
 
-      if (i + 1 < cleanedArgs.length) {
-        passthroughArgs.push(cleanedArgs[i + 1]);
+      if (nextArg && !nextArg.startsWith("--")) {
+        if (arg === "--db") {
+          dbValue = nextArg;
+        }
+
+        if (arg === "--modules") {
+          modulesValue = nextArg;
+        }
+
         i += 1;
+      } else {
+        missingValueFlags.push(arg);
       }
 
       continue;
@@ -72,60 +147,405 @@ function normalizeGeneratorArgs(rawArgs) {
 
   return {
     projectName,
-    forwardArgs: projectName ? [projectName, ...passthroughArgs] : passthroughArgs,
+    dbValue,
+    modulesValue,
+    passthroughArgs,
+    missingValueFlags,
   };
 }
 
-const { projectName, forwardArgs } = normalizeGeneratorArgs(args);
+/**
+ * Converts a comma-separated modules string into a trimmed, unique array.
+ *
+ * @param {string | null} modulesValue
+ * @returns {string[]}
+ */
+function parseModules(modulesValue) {
+  if (!modulesValue) {
+    return [];
+  }
 
-const root = process.cwd();
-const jsGen = path.join(root, "generators", "javaScript-backend-updated.mjs");
-const tsGen = path.join(root, "generators", "typeScript-backend-updated.mts");
-const tsxCli = path.join(root, "node_modules", "tsx", "dist", "cli.mjs");
+  return [...new Set(
+    modulesValue
+      .split(",")
+      .map((moduleName) => moduleName.trim())
+      .filter(Boolean)
+  )];
+}
 
 /**
- * Runs a child process and exits this wrapper with the same status code.
+ * Builds the final argv list that will be forwarded to the selected generator.
  *
- * @param {string} command
- * @param {string[]} commandArgs
- * @returns {never}
+ * @param {{
+ *   projectName: string,
+ *   db: string,
+ *   modules: string[],
+ *   passthroughArgs: string[],
+ *   shouldForwardDb: boolean
+ * }} config
+ * @returns {string[]}
  */
-function exitWithChildResult(command, commandArgs) {
-  const result = spawnSync(command, commandArgs, { stdio: "inherit" });
+function buildForwardArgs(config) {
+  const forwardArgs = [config.projectName];
+
+  if (config.modules.length > 0) {
+    forwardArgs.push("--modules", config.modules.join(","));
+  }
+
+  if (config.shouldForwardDb) {
+    forwardArgs.push("--db", config.db);
+  }
+
+  forwardArgs.push(...config.passthroughArgs);
+  return forwardArgs;
+}
+
+/**
+ * Uses prompts only when the CLI is incomplete or invalid.
+ * A zero-argument run opens the full creation wizard.
+ *
+ * @param {string[]} rawArgs
+ * @returns {Promise<{
+ *   projectName: string,
+ *   useTS: boolean,
+ *   db: string,
+ *   modules: string[],
+ *   passthroughArgs: string[],
+ *   shouldForwardDb: boolean,
+ *   setupCICD: boolean
+ * }>}
+ */
+async function resolveGeneratorConfig(rawArgs) {
+  const normalized = normalizeGeneratorArgs(rawArgs);
+  const fullWizard = rawArgs.length === 0;
+  const rawDb = normalized.dbValue ? normalized.dbValue.toLowerCase() : null;
+  const hasMissingProjectName = !normalized.projectName;
+  const hasProjectOnlyInput = Boolean(normalized.projectName)
+    && normalized.dbValue === null
+    && normalized.modulesValue === null
+    && normalized.passthroughArgs.length === 0
+    && normalized.missingValueFlags.length === 0;
+  const hasInvalidDb = rawDb !== null && !validDbValues.has(rawDb);
+  const needsLanguagePrompt = fullWizard || (hasProjectOnlyInput && !useTS);
+  const needsDbPrompt =
+    fullWizard
+    || normalized.missingValueFlags.includes("--db")
+    || hasInvalidDb
+    || hasProjectOnlyInput;
+  const needsModulesPrompt =
+    normalized.missingValueFlags.includes("--modules")
+    || hasProjectOnlyInput;
+  const needsCICDPrompt = (fullWizard || hasProjectOnlyInput) && !wantsCICD;
+  const shouldPrompt =
+    fullWizard
+    || hasMissingProjectName
+    || needsLanguagePrompt
+    || needsDbPrompt
+    || needsModulesPrompt
+    || needsCICDPrompt;
+
+  if (!shouldPrompt) {
+    return {
+      projectName: normalized.projectName,
+      useTS,
+      db: rawDb ?? "none",
+      modules: parseModules(normalized.modulesValue),
+      passthroughArgs: normalized.passthroughArgs,
+      shouldForwardDb: rawDb !== null,
+      setupCICD: wantsCICD,
+    };
+  }
+
+  const answers = await inquirer.prompt([
+    {
+      type: "input",
+      name: "projectName",
+      message: "Project name:",
+      default: normalized.projectName ?? "",
+      when: () => fullWizard || hasMissingProjectName,
+      validate: (value) => value.trim() ? true : "Project name is required.",
+    },
+    {
+      type: "rawlist",
+      name: "language",
+      message: "Choose your backend language:",
+      choices: [
+        { name: "JavaScript (.mjs) - standard JavaScript backend", value: "js" },
+        { name: "TypeScript (.mts) - typed TypeScript backend", value: "ts" },
+      ],
+      default: useTS ? 1 : 0,
+      when: () => needsLanguagePrompt,
+    },
+    {
+      type: "rawlist",
+      name: "db",
+      message: "Select your database option:",
+      choices: [
+        { name: "None - generate the backend without database setup", value: "none" },
+        { name: "MongoDB - configure the project for Mongo", value: "mongo" },
+        { name: "Postgres - configure the project for Postgres", value: "postgres" },
+      ],
+      default: rawDb === "mongo" ? 1 : rawDb === "postgres" ? 2 : 0,
+      when: () => needsDbPrompt,
+    },
+    {
+      type: "input",
+      name: "modules",
+      message: "Modules (comma-separated, optional):",
+      default: normalized.modulesValue ?? "",
+      when: () => needsModulesPrompt,
+    },
+    {
+      type: "confirm",
+      name: "setupCICD",
+      message: "Create a starter GitHub Actions CI/CD workflow too?",
+      default: true,
+      when: () => needsCICDPrompt,
+    },
+  ]);
+
+  return {
+    projectName: (answers.projectName ?? normalized.projectName ?? "").trim(),
+    useTS: needsLanguagePrompt ? answers.language === "ts" : useTS,
+    db: needsDbPrompt ? answers.db : rawDb ?? "none",
+    modules: needsModulesPrompt
+      ? parseModules(answers.modules ?? "")
+      : parseModules(normalized.modulesValue),
+    passthroughArgs: normalized.passthroughArgs,
+    shouldForwardDb: rawDb !== null || needsDbPrompt,
+    setupCICD: wantsCICD || Boolean(answers.setupCICD),
+  };
+}
+
+/**
+ * Prompts for the optional workflow content after the scaffold is generated.
+ *
+ * @returns {Promise<{
+ *   deploymentService: string,
+ *   deployCommand: string,
+ *   sshKeySecretName: string,
+ *   setupNgrok: boolean
+ * }>}
+ */
+async function promptForCICDConfig() {
+  const answers = await inquirer.prompt([
+    {
+      type: "rawlist",
+      name: "deploymentService",
+      message: "Deployment target for the workflow placeholder:",
+      choices: ["AWS", "DigitalOcean", "Heroku", "Custom"],
+      default: 0,
+    },
+    {
+      type: "input",
+      name: "deployCommand",
+      message: "Deployment command to run in GitHub Actions:",
+      default: 'echo "Replace this step with your real deployment command."',
+      validate: (value) => value.trim() ? true : "A deploy command is required.",
+    },
+    {
+      type: "input",
+      name: "sshKeySecretName",
+      message: "GitHub secret name for an SSH private key (optional):",
+      default: "",
+    },
+    {
+      type: "confirm",
+      name: "setupNgrok",
+      message: "Add an ngrok reminder to the workflow?",
+      default: false,
+    },
+  ]);
+
+  return {
+    deploymentService: answers.deploymentService,
+    deployCommand: answers.deployCommand.trim(),
+    sshKeySecretName: answers.sshKeySecretName.trim(),
+    setupNgrok: answers.setupNgrok,
+  };
+}
+
+/**
+ * Writes a starter GitHub Actions workflow into the generated project.
+ *
+ * @param {string} projectDir
+ * @param {{
+ *   deploymentService: string,
+ *   deployCommand: string,
+ *   sshKeySecretName: string,
+ *   setupNgrok: boolean
+ * }} cicdConfig
+ * @returns {string}
+ */
+function createCICDWorkflow(projectDir, cicdConfig) {
+  const workflowDir = path.join(projectDir, ".github", "workflows");
+  const workflowPath = path.join(workflowDir, "deploy.yml");
+  const sshEnvLine = cicdConfig.sshKeySecretName
+    ? `          SSH_PRIVATE_KEY: \${{ secrets.${cicdConfig.sshKeySecretName} }}\n`
+    : "";
+
+  const workflowContent = `name: CI/CD Pipeline
+
+# Generated by create-backend.mjs.
+# Replace the placeholder deploy step and secrets before using this workflow in production.
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+jobs:
+  build-and-deploy:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+
+      - name: Install dependencies
+        run: npm install
+
+      - name: Run tests
+        run: npm test --if-present
+
+      - name: Build project
+        run: npm run build --if-present
+
+      - name: Deploy to ${cicdConfig.deploymentService}
+        env:
+${sshEnvLine}          USE_NGROK: "${String(cicdConfig.setupNgrok)}"
+        shell: bash
+        run: |
+          echo "Deploy target: ${cicdConfig.deploymentService}"
+          if [ -n "\${SSH_PRIVATE_KEY:-}" ]; then
+            echo "SSH key secret is available for this workflow."
+          fi
+          if [ "\${USE_NGROK}" = "true" ]; then
+            echo "Add your ngrok start command here if you need a tunnel during deployment."
+          fi
+          ${cicdConfig.deployCommand}
+`;
+
+  fs.mkdirSync(workflowDir, { recursive: true });
+  fs.writeFileSync(workflowPath, workflowContent, "utf8");
+  return workflowPath;
+}
+
+/**
+ * Runs the selected generator and returns its exit code.
+ *
+ * @param {boolean} shouldUseTS
+ * @param {string[]} forwardArgs
+ * @returns {number}
+ */
+function runGenerator(shouldUseTS, forwardArgs) {
+  if (shouldUseTS) {
+    if (!fs.existsSync(tsGen)) {
+      console.error("Missing TS generator:", tsGen);
+      return 1;
+    }
+
+    if (!fs.existsSync(tsxCli)) {
+      console.error("Missing local tsx runtime:", tsxCli);
+      console.error("Run `npm i` in this project and try again.");
+      return 1;
+    }
+
+    const result = spawnSync(process.execPath, [tsxCli, tsGen, ...forwardArgs], {
+      stdio: "inherit",
+    });
+
+    if (result.error) {
+      console.error("Failed to run TypeScript generator:", result.error.message);
+      return 1;
+    }
+
+    return result.status ?? 1;
+  }
+
+  if (!fs.existsSync(jsGen)) {
+    console.error("Missing JS generator:", jsGen);
+    return 1;
+  }
+
+  const result = spawnSync(process.execPath, [jsGen, ...forwardArgs], {
+    stdio: "inherit",
+  });
 
   if (result.error) {
-    console.error("Failed to run generator:", result.error.message);
+    console.error("Failed to run JavaScript generator:", result.error.message);
+    return 1;
+  }
+
+  return result.status ?? 1;
+}
+
+/**
+ * Detects prompt cancellation so we can exit quietly.
+ *
+ * @param {unknown} error
+ * @returns {boolean}
+ */
+function isPromptCancellation(error) {
+  return Boolean(
+    error &&
+    typeof error === "object" &&
+    "name" in error &&
+    error.name === "ExitPromptError"
+  );
+}
+
+async function main() {
+  if (wantsHelp) {
+    printUsage();
+    return;
+  }
+
+  const config = await resolveGeneratorConfig(args);
+  const forwardArgs = buildForwardArgs(config);
+  const exitCode = runGenerator(config.useTS, forwardArgs);
+
+  if (exitCode !== 0) {
+    console.error(`Backend generator exited with code ${exitCode}.`);
+    process.exit(exitCode);
+  }
+
+  if (!config.setupCICD) {
+    return;
+  }
+
+  const projectDir = path.join(root, config.projectName);
+
+  if (!fs.existsSync(projectDir)) {
+    console.error("Project directory was not found after generation:", projectDir);
     process.exit(1);
   }
 
-  process.exit(result.status ?? 1);
+  const cicdConfig = await promptForCICDConfig();
+  const workflowPath = createCICDWorkflow(projectDir, cicdConfig);
+  console.log(`CI/CD workflow created successfully at ${workflowPath}`);
 }
 
-if (!projectName) {
-  console.error("Project name is required.");
-  console.error("Usage: node create-backend.mjs <project-name> [--ts] --modules user,post --db mongo");
-  console.error("Example: node create-backend.mjs my-api --ts --modules user,post --db mongo");
+main().catch((error) => {
+  if (isPromptCancellation(error)) {
+    console.error("Operation cancelled.");
+    process.exit(1);
+  }
+
+  const message = error instanceof Error ? error.message : String(error);
+  console.error("Failed to run create-backend.mjs:", message);
   process.exit(1);
-}
+});
 
-if (useTS) {
-  if (!fs.existsSync(tsGen)) {
-    console.error("? Missing TS generator:", tsGen);
-    process.exit(1);
-  }
 
-  if (!fs.existsSync(tsxCli)) {
-    console.error("Missing local tsx runtime:", tsxCli);
-    console.error("Run `npm i` in this project and try again.");
-    process.exit(1);
-  }
 
-  exitWithChildResult(process.execPath, [tsxCli, tsGen, ...forwardArgs]);
-} else {
-  if (!fs.existsSync(jsGen)) {
-    console.error("? Missing JS generator:", jsGen);
-    process.exit(1);
-  }
 
-  exitWithChildResult(process.execPath, [jsGen, ...forwardArgs]);
-}
+
+
