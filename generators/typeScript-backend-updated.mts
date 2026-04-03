@@ -108,10 +108,12 @@ function getArgValue(flag: string) {
 
 const modulesArg = getArgValue("--modules");
 let modules = modulesArg
-  ? modulesArg
-    .split(",")
-    .map((m) => m.trim())
-    .filter(Boolean)
+  ? [...new Set(
+    modulesArg
+      .split(",")
+      .map((m) => normalizeModuleName(m))
+      .filter(Boolean)
+  )]
   : [];
 
 const db = (getArgValue("--db") || "none").toLowerCase();
@@ -174,6 +176,20 @@ function toKebab(str: string) {
     .replace(/([a-z])([A-Z])/g, "$1-$2")
     .replace(/[\s_]+/g, "-")
     .toLowerCase();
+}
+
+/**
+ * Normalizes a module name to the canonical scaffold name.
+ *
+ * @param str - Raw module name.
+ * @returns Canonical module name.
+ */
+function normalizeModuleName(str: string) {
+  const normalized = toKebab(str).replace(/^-+|-+$/g, "");
+
+  if (normalized === "users") return "user";
+
+  return normalized;
 }
 
 /**
@@ -1343,7 +1359,7 @@ const securityMiddleware = (app: any) => {
   // 1. CORS FIRST - Handle preflight requests early
   app.use(cors(corsOptions));
 
-  // Cookie parser – so req.cookies is populated
+  // Cookie parser - so req.cookies is populated
   app.use(cookieParser());
 
   app.use(
@@ -2286,9 +2302,9 @@ datasource db {
  * @returns Module metadata and file map.
  */
 function moduleTemplates(rawName: string) {
-  const name = toKebab(rawName);
-  const camel = toCamel(rawName);
-  const pascal = toPascal(rawName);
+  const name = normalizeModuleName(rawName);
+  const camel = toCamel(name);
+  const pascal = toPascal(name);
   const plural = pluralize(name);
   const prismaDelegate = pascal.charAt(0).toLowerCase() + pascal.slice(1);
 
@@ -3152,17 +3168,20 @@ if (!fs.existsSync(pkgJsonPath)) {
 /**
  * Post-generation notes.
  */
-console.log(`Backend (.mts) created successfully 🚀`);
+console.log(`Backend (.mts) created successfully`);
 console.log(`DB mode: ${db}`);
-if (modules.length) console.log(`Modules scaffolded: ${modules.join(", ")}`);
-console.log(`Next: cd ${projectName} && npm i && npm run dev`);
+if (modules.length) console.log(`Features created: ${modules.join(", ")}`);
+
+console.log("Next steps:");
+console.log(`1. Go to your project folder: cd ${projectName}`);
+console.log("2. Install dependencies: npm i");
 
 if (db === "postgres") {
-  console.log("Postgres mode notes:");
-  console.log("- Update DATABASE_URL in .env");
-  console.log("- Run: npx prisma migrate dev --name init");
+  console.log("3. Open the .env file and set DATABASE_URL to your Postgres connection string.");
+  console.log("4. Run your first migration: npx prisma migrate dev --name init");
+  console.log("5. Start the app with npm run dev.");
 }
 if (db === "mongo") {
-  console.log("Mongo mode notes:");
-  console.log("- Update MONGO_URI in .env");
+  console.log("3. Open the .env file and set MONGO_URI to your MongoDB connection string.");
+  console.log("4. Start the app with npm run dev.");
 }

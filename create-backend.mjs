@@ -155,6 +155,27 @@ function normalizeGeneratorArgs(rawArgs) {
 }
 
 /**
+ * Normalizes a module name to the canonical scaffold name.
+ *
+ * @param {string} moduleName
+ * @returns {string}
+ */
+function normalizeModuleName(moduleName) {
+  const normalized = moduleName
+    .trim()
+    .replace(/([a-z])([A-Z])/g, "$1-$2")
+    .replace(/[\s_]+/g, "-")
+    .replace(/^-+|-+$/g, "")
+    .toLowerCase();
+
+  if (normalized === "users") {
+    return "user";
+  }
+
+  return normalized;
+}
+
+/**
  * Converts a comma-separated modules string into a trimmed, unique array.
  *
  * @param {string | null} modulesValue
@@ -168,7 +189,7 @@ function parseModules(modulesValue) {
   return [...new Set(
     modulesValue
       .split(",")
-      .map((moduleName) => moduleName.trim())
+      .map((moduleName) => normalizeModuleName(moduleName))
       .filter(Boolean)
   )];
 }
@@ -233,7 +254,8 @@ async function resolveGeneratorConfig(rawArgs) {
     || hasInvalidDb
     || hasProjectOnlyInput;
   const needsModulesPrompt =
-    normalized.missingValueFlags.includes("--modules")
+    fullWizard
+    || normalized.missingValueFlags.includes("--modules")
     || hasProjectOnlyInput;
   const needsCICDPrompt = (fullWizard || hasProjectOnlyInput) && !wantsCICD;
   const shouldPrompt =
@@ -332,7 +354,7 @@ async function promptForCICDConfig() {
     {
       type: "rawlist",
       name: "deploymentService",
-      message: "Deployment target for the workflow placeholder:",
+      message: "Where do you want to deploy your app?",
       choices: ["AWS", "DigitalOcean", "Heroku", "Custom"],
       default: 0,
     },
@@ -439,52 +461,74 @@ ${sshEnvLine}          USE_NGROK: "${String(cicdConfig.setupNgrok)}"
 }
 
 /**
- * Runs the selected generator and returns its exit code.
+ * Runs the selected generator and optionally captures its output.
  *
  * @param {boolean} shouldUseTS
  * @param {string[]} forwardArgs
- * @returns {number}
+ * @param {{ captureOutput?: boolean }} [options]
+ * @returns {{ exitCode: number, stdout: string, stderr: string }}
  */
-function runGenerator(shouldUseTS, forwardArgs) {
+function runGenerator(shouldUseTS, forwardArgs, options = {}) {
+  const captureOutput = Boolean(options.captureOutput);
+  const spawnOptions = captureOutput
+    ? { stdio: "pipe", encoding: "utf8" }
+    : { stdio: "inherit" };
+
   if (shouldUseTS) {
     if (!fs.existsSync(tsGen)) {
       console.error("Missing TS generator:", tsGen);
-      return 1;
+      return { exitCode: 1, stdout: "", stderr: "" };
     }
 
     if (!fs.existsSync(tsxCli)) {
       console.error("Missing local tsx runtime:", tsxCli);
       console.error("Run `npm i` in this project and try again.");
-      return 1;
+      return { exitCode: 1, stdout: "", stderr: "" };
     }
 
-    const result = spawnSync(process.execPath, [tsxCli, tsGen, ...forwardArgs], {
-      stdio: "inherit",
-    });
+    const result = spawnSync(
+      process.execPath,
+      [tsxCli, tsGen, ...forwardArgs],
+      spawnOptions
+    );
 
     if (result.error) {
       console.error("Failed to run TypeScript generator:", result.error.message);
-      return 1;
+      return {
+        exitCode: 1,
+        stdout: captureOutput ? result.stdout ?? "" : "",
+        stderr: captureOutput ? result.stderr ?? "" : "",
+      };
     }
 
-    return result.status ?? 1;
+    return {
+      exitCode: result.status ?? 1,
+      stdout: captureOutput ? result.stdout ?? "" : "",
+      stderr: captureOutput ? result.stderr ?? "" : "",
+    };
   }
 
   if (!fs.existsSync(jsGen)) {
     console.error("Missing JS generator:", jsGen);
-    return 1;
+    return { exitCode: 1, stdout: "", stderr: "" };
   }
 
-  const result = spawnSync(process.execPath, [jsGen, ...forwardArgs], {
-    stdio: "inherit",
-  });
+  const result = spawnSync(process.execPath, [jsGen, ...forwardArgs], spawnOptions);
 
   if (result.error) {
     console.error("Failed to run JavaScript generator:", result.error.message);
-    return 1;
+    return {
+      exitCode: 1,
+      stdout: captureOutput ? result.stdout ?? "" : "",
+      stderr: captureOutput ? result.stderr ?? "" : "",
+    };
   }
 
-  return result.status ?? 1;
+  return {
+    exitCode: result.status ?? 1,
+    stdout: captureOutput ? result.stdout ?? "" : "",
+    stderr: captureOutput ? result.stderr ?? "" : "",
+  };
 }
 
 /**
@@ -510,11 +554,31 @@ async function main() {
 
   const config = await resolveGeneratorConfig(args);
   const forwardArgs = buildForwardArgs(config);
-  const exitCode = runGenerator(config.useTS, forwardArgs);
+  const generatorResult = runGenerator(config.useTS, forwardArgs, {
+    captureOutput: config.setupCICD,
+  });
+  let printedBufferedOutput = false;
 
-  if (exitCode !== 0) {
-    console.error(`Backend generator exited with code ${exitCode}.`);
-    process.exit(exitCode);
+  const printBufferedOutput = () => {
+    if (printedBufferedOutput || !config.setupCICD) {
+      return;
+    }
+
+    if (generatorResult.stdout) {
+      process.stdout.write(generatorResult.stdout);
+    }
+
+    if (generatorResult.stderr) {
+      process.stderr.write(generatorResult.stderr);
+    }
+
+    printedBufferedOutput = true;
+  };
+
+  if (generatorResult.exitCode !== 0) {
+    printBufferedOutput();
+    console.error(`Backend generator exited with code ${generatorResult.exitCode}.`);
+    process.exit(generatorResult.exitCode);
   }
 
   if (!config.setupCICD) {
@@ -524,12 +588,15 @@ async function main() {
   const projectDir = path.join(root, config.projectName);
 
   if (!fs.existsSync(projectDir)) {
+    printBufferedOutput();
     console.error("Project directory was not found after generation:", projectDir);
     process.exit(1);
   }
 
   const cicdConfig = await promptForCICDConfig();
   const workflowPath = createCICDWorkflow(projectDir, cicdConfig);
+
+  printBufferedOutput();
   console.log(`CI/CD workflow created successfully at ${workflowPath}`);
 }
 

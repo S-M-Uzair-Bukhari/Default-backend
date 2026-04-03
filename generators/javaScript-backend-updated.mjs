@@ -1,21 +1,21 @@
 /**
  * create-backend.mjs (JS/.mjs PRODUCTION VERSION)
  *
- * Ã¢Å“â€¦ Generates a production-ready ESM backend scaffold (.mjs only)
+ * Generates a production-ready ESM backend scaffold (.mjs only)
  * - DB: --db none | mongo | postgres
  * - Modules: --modules user,post
  *
- * Ã¢Å“â€¦ Your requirements implemented:
- * - Ã¢Å“â€¦ Mongo pagination file kept EXACTLY as you provided (mongoPaginate/isMongooseModel)
- * - Ã¢Å“â€¦ NO pagination middleware usage in routes
- * - Ã¢Å“â€¦ Controllers build: filter = {} and options = {} then call service
- * - Ã¢Å“â€¦ Services call paginate (mongoPaginate for Mongo / sequelizePaginate for Postgres)
- * - Ã¢Å“â€¦ sendSuccess signature everywhere: sendSuccess(res, status, message, data)
- * - Ã¢Å“â€¦ Services return block: { success, status, message, data }
- * - Ã¢Å“â€¦ Each module includes Messages file: module.messages.mjs
- * - Ã¢Å“â€¦ Sequelize slow query logger included
- * - Ã¢Å“â€¦ Mongoose slow query plugin included
- * - Ã¢Å“â€¦ uploadMiddleware.mjs included (JS version)
+ * Requirements implemented:
+ * - Mongo pagination file kept EXACTLY as you provided (mongoPaginate/isMongooseModel)
+ * - NO pagination middleware usage in routes
+ * - Controllers build: filter = {} and options = {} then call service
+ * - Services call paginate (mongoPaginate for Mongo / sequelizePaginate for Postgres)
+ * - sendSuccess signature everywhere: sendSuccess(res, status, message, data)
+ * - Services return block: { success, status, message, data }
+ * - Each module includes Messages file: module.messages.mjs
+ * - Sequelize slow query logger included
+ * - Mongoose slow query plugin included
+ * - uploadMiddleware.mjs included (JS version)
  *
  * Examples:
  *  node .\generators\javaScript-backend-updated.mjs my-api --db mongo --modules user,post
@@ -34,7 +34,12 @@ import path from "path";
 const projectName = process.argv[2];
 const modulesArg = getArgValue("--modules");
 let modules = modulesArg
-  ? modulesArg.split(",").map((m) => m.trim()).filter(Boolean)
+  ? [...new Set(
+    modulesArg
+      .split(",")
+      .map((m) => normalizeModuleName(m))
+      .filter(Boolean)
+  )]
   : [];
 
 const db = (getArgValue("--db") || "none").toLowerCase(); // mongo | postgres | none
@@ -87,6 +92,16 @@ function toKebab(str) {
     .replace(/([a-z])([A-Z])/g, "$1-$2")
     .replace(/[\s_]+/g, "-")
     .toLowerCase();
+}
+
+function normalizeModuleName(str) {
+  const normalized = toKebab(str).replace(/^-+|-+$/g, "");
+
+  if (normalized === "users") {
+    return "user";
+  }
+
+  return normalized;
 }
 
 function toCamel(str) {
@@ -714,7 +729,7 @@ export async function mongoPaginate(model, filter = {}, options = {}, skipPagina
     }
     sort = fields.join(" ");
   } else {
-    // Ã¢Å“â€¦ Correct fallback Ã¢â‚¬â€ Mongoose expects "-createdAt" not "createdAt:desc"
+    // Correct fallback - Mongoose expects "-createdAt" not "createdAt:desc"
     sort = "-createdAt";
   }
 
@@ -739,7 +754,7 @@ export async function mongoPaginate(model, filter = {}, options = {}, skipPagina
 
     for (const pop of populates) {
       if (typeof pop === "string") {
-        // dot-path string Ã¢â€ â€™ nested populate objects
+        // dot-path string to nested populate objects
         const nested = pop.split(".").reduceRight((acc, path) => (acc ? { path, populate: acc } : { path }), null);
         q = q.populate(nested);
       } else if (pop && typeof pop === "object") {
@@ -1787,7 +1802,7 @@ export const asyncHandler = (fn, meta) => (req, res, next) =>
   });
 `,
 
-  // Ã¢Å“â€¦ sendSuccess signature updated (your requirement)
+  // sendSuccess signature updated (your requirement)
   [`src/utils/globalResponse.${ext}`]: `export const sendSuccess = (res, statusCode = 200, message = "Success", data = {}) => {
   return res.status(statusCode).json({
     success: true,
@@ -1811,7 +1826,7 @@ export const asyncHandler = (fn, meta) => (req, res, next) =>
 export default errorResponse;
 `,
 
-  // Ã¢Å“â€¦ Validate middleware (kept)
+  // Validate middleware (kept)
   [`src/middlewares/validate.${ext}`]: `import { z } from "zod";
 import Response from "../utils/errorResponse.${ext}";
 import { logger } from "../utils/logger.${ext}";
@@ -1914,7 +1929,7 @@ const isEmptyFiles = (files) => {
   [`src/middlewares/auth.${ext}`]: authMiddlewareTemplate(),
   [`src/middlewares/errorMiddleware.${ext}`]: errorMiddlewareTemplate(),
 
-  // Ã¢Å“â€¦ Pagination files
+  // Pagination files
   ...(db === "mongo" ? { [`src/middlewares/paginationMiddleware.${ext}`]: mongoPaginationFileExact() } : {}),
   ...(db === "postgres" ? { [`src/middlewares/paginationMiddleware.${ext}`]: sequelizePaginateFile() } : {}),
   ...(db === "none"
@@ -1930,7 +1945,7 @@ export function isMongooseModel() { return false; }
       }
     : {}),
 
-  // Ã¢Å“â€¦ Upload middleware
+  // Upload middleware
   [`src/middlewares/uploadMiddleware.${ext}`]: uploadMiddlewareTemplate(),
 
   [`server.${ext}`]: serverFile,
@@ -1962,9 +1977,9 @@ Object.entries(sharedFiles).forEach(([p, c]) => writeFile(p, c));
    Module templates per DB
 ---------------------------- */
 function moduleTemplates(rawName) {
-  const name = toKebab(rawName);
-  const camel = toCamel(rawName);
-  const pascal = toPascal(rawName);
+  const name = normalizeModuleName(rawName);
+  const camel = toCamel(name);
+  const pascal = toPascal(name);
   const plural = pluralize(name);
 
   const moduleBasePath = `src/modules/${name}`;
@@ -2843,16 +2858,18 @@ if (!fs.existsSync(pkgJsonPath)) {
 
 console.log(`Backend (.mjs) structure created successfully`);
 console.log(`DB mode: ${db}`);
-if (modules.length) console.log(`Modules scaffolded: ${modules.join(", ")}`);
+if (modules.length) console.log(`Features created: ${modules.join(", ")}`);
+
+console.log("Next steps:");
+console.log(`1. Go to your project folder: cd ${projectName}`);
+console.log("2. Install dependencies: npm i");
 
 if (db === "postgres") {
-  console.log("Postgres mode notes:");
-  console.log("- Update DATABASE_URL in .env");
-  console.log("- Run: npm i");
-  console.log("- Sequelize models sync automatically on startup");
+  console.log("3. Open the .env file and set DATABASE_URL to your Postgres connection string.");
+  console.log("4. Start the app with npm run dev.");
+  console.log("5. Sequelize models will sync automatically when the app starts.");
 }
 if (db === "mongo") {
-  console.log("Mongo mode notes:");
-  console.log("- Update MONGO_URI in .env");
-  console.log("- Run: npm i");
+  console.log("3. Open the .env file and set MONGO_URI to your MongoDB connection string.");
+  console.log("4. Start the app with npm run dev.");
 }
