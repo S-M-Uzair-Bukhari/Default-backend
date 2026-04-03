@@ -8,13 +8,13 @@
  * - Accepts direct CLI arguments or prompts for missing values with Inquirer
  * - Can optionally generate a starter GitHub Actions CI/CD workflow
  *
- * If you just cloned or pulled this repository, run `npm install` first.
- * This installs local dependencies required by this script, such as `inquirer` and `tsx`.
+ * If local dependencies are missing, this script can run `npm install` automatically.
+ * On the first run, it may take a moment to install `inquirer` and `tsx`.
  *
  * Simple setup for new users:
- * 1. Run `npm install`
- * 2. Run `node create-backend.mjs --help`
- * 3. Run `node create-backend.mjs my-api` to start the guided setup
+ * 1. Run `node create-backend.mjs`
+ * 2. Answer the setup questions
+ * 3. Follow the final project instructions
  *
  * How to use this script:
  * - Run `node create-backend.mjs` for a fully interactive flow
@@ -35,7 +35,7 @@
  * `node create-backend.mjs`
  *
  * Quick CLI examples:
- * `npm install`
+ * `node create-backend.mjs`
  * `node create-backend.mjs --help`
  * `node create-backend.mjs my-api`
  *
@@ -47,7 +47,6 @@
 import { spawnSync } from "node:child_process";
 import fs from "node:fs";
 import path from "node:path";
-import inquirer from "inquirer";
 
 const args = process.argv.slice(2);
 const validDbValues = new Set(["none", "mongo", "postgres"]);
@@ -60,17 +59,21 @@ const root = process.cwd();
 const jsGen = path.join(root, "generators", "javaScript-backend-updated.mjs");
 const tsGen = path.join(root, "generators", "typeScript-backend-updated.mts");
 const tsxCli = path.join(root, "node_modules", "tsx", "dist", "cli.mjs");
+const inquirerDir = path.join(root, "node_modules", "inquirer");
+const windowsShell = process.env.ComSpec || "cmd.exe";
+let inquirerInstance = null;
+let attemptedAutoInstall = false;
 
 /**
  * Prints the supported usage patterns for this wrapper.
  */
 function printUsage() {
-  console.log("If you just cloned or pulled this repository, run npm install first.");
+  console.log("If local dependencies are missing, this script will run npm install automatically.");
   console.log("");
   console.log("Quick start:");
-  console.log("  1. npm install");
-  console.log("  2. node create-backend.mjs --help");
-  console.log("  3. node create-backend.mjs my-api");
+  console.log("  1. node create-backend.mjs");
+  console.log("  2. Answer the setup questions");
+  console.log("  3. Follow the final project instructions");
   console.log("");
   console.log("Usage: node create-backend.mjs <project-name> [--ts] [--modules user,post] [--db mongo|postgres|none] [--cicd]");
   console.log("Interactive: node create-backend.mjs");
@@ -81,9 +84,82 @@ function printUsage() {
   console.log("  Optional modules and optional CI/CD setup");
   console.log("");
   console.log("Examples:");
-  console.log("  node create-backend.mjs my-api");
+  console.log("  node create-backend.mjs");
   console.log("  node create-backend.mjs my-api --modules user,post --db mongo");
   console.log("  node create-backend.mjs my-api --ts --modules user,post --db postgres --cicd");
+}
+
+function installLocalDependencies() {
+  console.log("Local packages are missing. Running npm install...");
+
+  const npmInstallCommand = process.platform === "win32"
+    ? { file: windowsShell, args: ["/d", "/s", "/c", "npm install"] }
+    : { file: "npm", args: ["install"] };
+
+  const result = spawnSync(npmInstallCommand.file, npmInstallCommand.args, {
+    cwd: root,
+    stdio: "inherit",
+  });
+
+  if (result.error) {
+    console.error("Failed to run npm install:", result.error.message);
+    return false;
+  }
+
+  const exitCode = result.status ?? 1;
+
+  if (exitCode !== 0) {
+    console.error(`npm install exited with code ${exitCode}.`);
+    return false;
+  }
+
+  return true;
+}
+
+function ensureLocalDependenciesInstalled(options = {}) {
+  const needsInquirer = Boolean(options.needsInquirer);
+  const needsTSX = Boolean(options.needsTSX);
+  const missingInquirer = needsInquirer && !fs.existsSync(inquirerDir);
+  const missingTSX = needsTSX && !fs.existsSync(tsxCli);
+
+  if (!missingInquirer && !missingTSX) {
+    return true;
+  }
+
+  if (!attemptedAutoInstall) {
+    attemptedAutoInstall = true;
+
+    if (!installLocalDependencies()) {
+      return false;
+    }
+  }
+
+  const stillMissingInquirer = needsInquirer && !fs.existsSync(inquirerDir);
+  const stillMissingTSX = needsTSX && !fs.existsSync(tsxCli);
+
+  if (stillMissingInquirer) {
+    console.error("Missing local dependency: inquirer");
+  }
+
+  if (stillMissingTSX) {
+    console.error("Missing local dependency: tsx");
+  }
+
+  return !stillMissingInquirer && !stillMissingTSX;
+}
+
+async function getInquirer() {
+  if (inquirerInstance) {
+    return inquirerInstance;
+  }
+
+  if (!ensureLocalDependenciesInstalled({ needsInquirer: true })) {
+    throw new Error("Local dependencies could not be installed. Please run npm install and try again.");
+  }
+
+  const module = await import("inquirer");
+  inquirerInstance = module.default;
+  return inquirerInstance;
 }
 
 /**
@@ -278,6 +354,7 @@ async function resolveGeneratorConfig(rawArgs) {
     };
   }
 
+  const inquirer = await getInquirer();
   const answers = await inquirer.prompt([
     {
       type: "input",
@@ -350,6 +427,7 @@ async function resolveGeneratorConfig(rawArgs) {
  * }>}
  */
 async function promptForCICDConfig() {
+  const inquirer = await getInquirer();
   const answers = await inquirer.prompt([
     {
       type: "rawlist",
@@ -475,6 +553,10 @@ function runGenerator(shouldUseTS, forwardArgs, options = {}) {
     : { stdio: "inherit" };
 
   if (shouldUseTS) {
+    if (!ensureLocalDependenciesInstalled({ needsTSX: true })) {
+      return { exitCode: 1, stdout: "", stderr: "" };
+    }
+
     if (!fs.existsSync(tsGen)) {
       console.error("Missing TS generator:", tsGen);
       return { exitCode: 1, stdout: "", stderr: "" };
@@ -482,7 +564,6 @@ function runGenerator(shouldUseTS, forwardArgs, options = {}) {
 
     if (!fs.existsSync(tsxCli)) {
       console.error("Missing local tsx runtime:", tsxCli);
-      console.error("Run `npm i` in this project and try again.");
       return { exitCode: 1, stdout: "", stderr: "" };
     }
 
