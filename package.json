@@ -1,9 +1,13 @@
 {
-  "name": "default-backend",
+  "name": "create-default-backend",
   "version": "1.0.0",
-  "description": "",
+  "description": "CLI to scaffold default backend projects.",
   "main": "index.js",
+  "bin": {
+    "create-default-backend": "./create-backend.mjs"
+  },
   "scripts": {
+    "create": "node create-backend.mjs",
     "postinstall": "node scripts/postinstall-message.mjs",
     "test": "echo \"Error: no test specified\" && exit 1"
   },
@@ -19,4 +23,3 @@
     "inquirer": "^13.3.2"
   }
 }
-

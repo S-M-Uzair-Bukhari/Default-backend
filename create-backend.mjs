@@ -12,13 +12,13 @@
  * On the first run, it may take a moment to install `inquirer` and `tsx`.
  *
  * Simple setup for new users:
- * 1. Run `node create-backend.mjs`
+ * 1. Run `npm run create`
  * 2. Answer the setup questions
  * 3. Follow the final project instructions
  *
  * How to use this script:
- * - Run `node create-backend.mjs` for a fully interactive flow
- * - Run `node create-backend.mjs <project-name>` to create a project and choose options in the CLI
+ * - Run `npm run create` for a fully interactive flow
+ * - Run `npm run create -- <project-name>` to create a project and choose options in the CLI
  * - The CLI can ask you to select JavaScript or TypeScript
  * - The CLI can ask you to select a database: `none`, `mongo`, or `postgres`
  * - If you already know what you want, you can pass flags directly
@@ -31,18 +31,18 @@
  * - `--help`    Show usage instructions without generating a project
  *
  * Usage:
- * `node create-backend.mjs <project-name> [--ts] [--modules user,post] [--db mongo|postgres|none] [--cicd]`
- * `node create-backend.mjs`
+ * `npm run create -- <project-name> [--ts] [--modules user,post] [--db mongo|postgres|none] [--cicd]`
+ * `npm run create`
  *
  * Quick CLI examples:
- * `node create-backend.mjs`
- * `node create-backend.mjs --help`
- * `node create-backend.mjs my-api`
+ * `npm run create`
+ * `npm run create -- --help`
+ * `npm run create -- my-api`
  *
  * More examples:
- * `node create-backend.mjs my-api`
- * `node create-backend.mjs my-api --modules user,post --db mongo`
- * `node create-backend.mjs my-api --ts --modules user,post --db postgres --cicd`
+ * `npm run create -- my-api`
+ * `npm run create -- my-api --modules user,post --db mongo`
+ * `npm run create -- my-api --ts --modules user,post --db postgres --cicd`
  */
 import { spawnSync } from "node:child_process";
 import fs from "node:fs";
@@ -71,12 +71,13 @@ function printUsage() {
   console.log("If local dependencies are missing, this script will run npm install automatically.");
   console.log("");
   console.log("Quick start:");
-  console.log("  1. node create-backend.mjs");
+  console.log("  1. npm run create");
   console.log("  2. Answer the setup questions");
   console.log("  3. Follow the final project instructions");
   console.log("");
-  console.log("Usage: node create-backend.mjs <project-name> [--ts] [--modules user,post] [--db mongo|postgres|none] [--cicd]");
-  console.log("Interactive: node create-backend.mjs");
+  console.log("Usage: npm run create -- <project-name> [--ts] [--modules user,post] [--db mongo|postgres|none] [--cicd]");
+  console.log("Interactive: npm run create");
+  console.log("Published CLI: npm create default-backend or npx create-default-backend");
   console.log("");
   console.log("What the CLI will ask you:");
   console.log("  Language: JavaScript (.mjs) or TypeScript (.mts)");
@@ -84,9 +85,9 @@ function printUsage() {
   console.log("  Optional modules and optional CI/CD setup");
   console.log("");
   console.log("Examples:");
-  console.log("  node create-backend.mjs");
-  console.log("  node create-backend.mjs my-api --modules user,post --db mongo");
-  console.log("  node create-backend.mjs my-api --ts --modules user,post --db postgres --cicd");
+  console.log("  npm run create");
+  console.log("  npm run create -- my-api --modules user,post --db mongo");
+  console.log("  npm run create -- my-api --ts --modules user,post --db postgres --cicd");
 }
 
 function installLocalDependencies() {

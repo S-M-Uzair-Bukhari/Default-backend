@@ -22,7 +22,7 @@
  *  node .\generators\javaScript-backend-updated.mjs my-api --db postgres --modules user,post
  * 
  * TEST: 
- * node create-backend.mjs my-api --db postgres --modules user,post
+ * npm run create -- my-api --db postgres --modules user,post
  */
 
 import fs from "fs";
@@ -50,7 +50,7 @@ if (!["mongo", "postgres", "none"].includes(db)) {
 
 if (!projectName) {
   console.log("Please provide project name");
-  console.log("Example: node create-backend.mjs my-api --modules user,post --db mongo");
+  console.log("Example: npm run create -- my-api --modules user,post --db mongo");
   process.exit(1);
 }
 
